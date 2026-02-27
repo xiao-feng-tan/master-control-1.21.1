@@ -21,9 +21,10 @@ import org.lwjgl.glfw.GLFW;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 public class AutoTaskManager {
     private static final Logger LOGGER = LoggerFactory.getLogger("master-control-task");
@@ -33,16 +34,29 @@ public class AutoTaskManager {
     private TaskStage currentStage = TaskStage.IDLE;
     private int tickCounter = 0;
     private int waitTicks = 5;
-
-    // 模式区分
     private TaskMode currentMode = TaskMode.NORMAL;
+
+    private long stageStartTime = 0;
+
+    private boolean awaitingSoundChat = false; // 声音触发后等待聊天
+    private long soundDetectedTime = 0;
+    // 任务队列，存储待执行的任务及其触发时间
+    private final Queue<PendingTask> pendingTasks = new LinkedList<>();
+    private boolean taskRunning = false;
+
+    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r);
+        t.setDaemon(true);
+        return t;
+    });
+
+    // 正常模式要检查的两个格子
+    private final int[] normalSlotsToCheck = {28, 37};
+    private int normalSlotIndex = 0; // 当前正在检查的格子索引（0 表示第一个）
+
     // 补给模式相关
     private List<Integer> supplySlots = null;
     private int supplySlotIndex = 0;
-
-    // 聊天等待相关
-    private boolean awaitingChat = false;
-    private long soundDetectedTime = 0;
 
     // 第二界面点击记录（用于正常模式）
     private int lastClickedSecondScreenSlot = -1;
@@ -59,57 +73,95 @@ public class AutoTaskManager {
         return instance;
     }
 
-    // 音效触发时调用（由 Mixin 触发）
+    // 音效触发
     public void onSoundDetected() {
         if (!ModState.getInstance().isMasterEnabled()) {
             LOGGER.info("Master switch is off, ignoring sound.");
             return;
         }
-        if (currentStage != TaskStage.IDLE) {
-            LOGGER.info("Task already running, ignoring sound.");
+        if (awaitingSoundChat) {
+            LOGGER.info("Already awaiting chat for sound, ignoring duplicate sound.");
             return;
         }
-        awaitingChat = true;
+        LOGGER.info("Sound detected, now awaiting chat message '您获得'.");
+        awaitingSoundChat = true;
         soundDetectedTime = System.currentTimeMillis();
-        LOGGER.info("Sound detected, waiting for chat message '您获得' or '用完了'...");
     }
 
-    // 聊天消息到达时调用（由 MasterControl 注册的事件触发）
+    // 聊天消息到达
     public void onChatMessageReceived(String message) {
-        if (!awaitingChat) return;
-        if (message.contains("您获得")) {
-            LOGGER.info("Chat message contains '您获得', starting normal task.");
-            awaitingChat = false;
-            currentMode = TaskMode.NORMAL;
-            startTask();
-        } else if (message.contains("用完了")) {
-            LOGGER.info("Chat message contains '用完了', starting supply task.");
-            awaitingChat = false;
-            currentMode = TaskMode.SUPPLY;
-            startTask();
+        if (!ModState.getInstance().isMasterEnabled()) {
+            LOGGER.info("Master switch is off, ignoring chat.");
+            return;
         }
-        // 超时（5秒）后自动取消等待
-        if (System.currentTimeMillis() - soundDetectedTime > 5000) {
-            LOGGER.info("Chat wait timeout, resetting.");
-            awaitingChat = false;
+
+        if (message.contains("用完了")) {
+            // 检查当前是否有任务运行，以及队列中是否已有等待的 SUPPLY 任务
+            boolean hasPendingSupply = false;
+            for (PendingTask task : pendingTasks) {
+                if (task.mode == TaskMode.SUPPLY) {
+                    hasPendingSupply = true;
+                    break;
+                }
+            }
+            if (!taskRunning && !hasPendingSupply) {
+                LOGGER.info("Chat contains '用完了', queuing SUPPLY task.");
+                pendingTasks.offer(new PendingTask(TaskMode.SUPPLY, System.currentTimeMillis()));
+            } else {
+                LOGGER.info("Ignoring '用完了' because task is running or supply already pending.");
+            }
+            return;
+        }
+
+        if (message.contains("您获得")) {
+            if (awaitingSoundChat) {
+                LOGGER.info("Chat contains '您获得', queuing NORMAL task (from sound).");
+                awaitingSoundChat = false;
+                pendingTasks.offer(new PendingTask(TaskMode.NORMAL, System.currentTimeMillis()));
+                tryStartNextTask();
+            } else {
+                LOGGER.info("Chat contains '您获得', attempting to start next pending task.");
+                tryStartNextTask();
+            }
         }
     }
 
-    public void startTask() {
-        if (currentStage == TaskStage.IDLE) {
-            lastClickedSecondScreenSlot = -1;
-            supplySlots = null;
-            supplySlotIndex = 0;
-            currentStage = TaskStage.SELECT_HOTBAR_SLOT_2;
-            tickCounter = 0;
-            LOGGER.info("Auto task started in mode: {}", currentMode);
-        } else {
-            LOGGER.info("Task already running, ignoring start request.");
+    private void tryStartNextTask() {
+        if (taskRunning) return;
+        PendingTask next = pendingTasks.poll();
+        if (next != null) {
+            startTask(next.mode);
         }
+    }
+
+    private void startTask(TaskMode mode) {
+        LOGGER.info("Starting task in mode: {}", mode);
+        taskRunning = true;
+        currentMode = mode;
+        lastClickedSecondScreenSlot = -1;
+        supplySlots = null;
+        supplySlotIndex = 0;
+        currentStage = TaskStage.SELECT_HOTBAR_SLOT_2;
+        tickCounter = 0;
+        normalSlotIndex = 0;
+    }
+
+    private void finishTask() {
+        LOGGER.info("Task finished.");
+        taskRunning = false;
+        currentStage = TaskStage.IDLE;
+        tryStartNextTask(); // 启动队列中的下一个任务
     }
 
     private void tick() {
-        if (currentStage == TaskStage.IDLE || client.player == null || client.interactionManager == null) {
+        // ----- 超时检查：声音触发后等待“您获得”超过20秒则取消等待 -----
+        if (awaitingSoundChat && System.currentTimeMillis() - soundDetectedTime > 20000) {
+            LOGGER.info("Awaiting chat for sound timed out after 5 seconds, resetting.");
+            awaitingSoundChat = false;
+        }
+
+        // 如果当前没有任务运行，或者游戏状态不满足条件，则跳过
+        if (!taskRunning || currentStage == TaskStage.IDLE || client.player == null || client.interactionManager == null) {
             return;
         }
 
@@ -119,8 +171,9 @@ public class AutoTaskManager {
         }
         tickCounter = 0;
 
-        LOGGER.info("Task stage: {}", currentStage);
+        LOGGER.info("Task stage: {} (mode: {})", currentStage, currentMode);
 
+        // ----- 原有任务状态机 -----
         switch (currentStage) {
             case SELECT_HOTBAR_SLOT_2:
                 selectHotbarSlot(1);
@@ -135,8 +188,14 @@ public class AutoTaskManager {
                 break;
 
             case WAIT_FIRST_SCREEN:
+                if (stageStartTime == 0) stageStartTime = System.currentTimeMillis();
                 if (client.currentScreen instanceof GenericContainerScreen) {
+                    stageStartTime = 0;
                     currentStage = TaskStage.CLICK_BACKPACK_SLOT;
+                } else if (System.currentTimeMillis() - stageStartTime > 5000) { // 5秒超时
+                    LOGGER.warn("Wait for first screen timed out, forcing proceed.");
+                    stageStartTime = 0;
+                    currentStage = TaskStage.CLICK_BACKPACK_SLOT; // 或 finishTask()
                 }
                 break;
 
@@ -154,15 +213,23 @@ public class AutoTaskManager {
 
             case CHECK_REMAINING:
                 if (currentMode == TaskMode.NORMAL) {
-                    if (checkRemainingAndRightClick()) {
+                    if (normalSlotIndex >= normalSlotsToCheck.length) {
+                        // 两个格子都检查完毕，关闭屏幕
+                        currentStage = TaskStage.CLOSE_SCREEN;
+                        LOGGER.info("All normal slots checked, closing screen.");
+                        break;
+                    }
+                    int slotIndex = normalSlotsToCheck[normalSlotIndex];
+                    if (checkRemainingAndRightClick(slotIndex)) {
+                        // 该格子需要补充，进入第三界面
                         currentStage = TaskStage.WAIT_THIRD_SCREEN;
-                        LOGGER.info("Stage: CHECK_REMAINING - remaining found, right clicked");
+                        LOGGER.info("Stage: CHECK_REMAINING - need supply for slot {}, entering third screen", slotIndex);
                     } else {
-                        currentStage = TaskStage.IDLE;
-                        LOGGER.info("Stage: CHECK_REMAINING - no remaining, task finished");
+                        // 格子不需要补充或格子为空，直接检查下一个
+                        normalSlotIndex++;
                     }
                 } else { // SUPPLY
-                    // 初始化补给槽位列表
+                    // 原有补给模式逻辑不变
                     supplySlots = List.of(31, 32, 33, 34, 35, 40, 41, 42, 43, 44);
                     supplySlotIndex = 0;
                     currentStage = TaskStage.SUPPLY_CHECK_LOOP;
@@ -177,13 +244,11 @@ public class AutoTaskManager {
                 break;
 
             case SELECT_ITEM_BY_STATE:
-                selectItemByState(); // 内部会设置下一个阶段（CLOSE_SCREEN 或 IDLE）
-                LOGGER.info("Stage: SELECT_ITEM_BY_STATE - item selected: {}", currentStage != TaskStage.IDLE);
+                selectItemByState(); // 内部会设置下一阶段或结束任务
                 break;
 
             case CLOSE_SCREEN:
                 if (client.currentScreen != null) {
-                    // 模拟按下 ESC 键
                     int keyCode = GLFW.GLFW_KEY_ESCAPE;
                     int scanCode = 0;
                     int modifiers = 0;
@@ -192,7 +257,29 @@ public class AutoTaskManager {
                 } else {
                     LOGGER.info("No screen to close.");
                 }
-                currentStage = TaskStage.WAIT_SCREEN_CLOSE;
+                // 调度延迟任务，0.5秒后执行后续操作
+                scheduler.schedule(() -> {
+                    client.execute(() -> {
+                        // 确保屏幕已关闭（如果仍开着则强制关闭）
+                        if (client.currentScreen != null) {
+                            LOGGER.info("Screen still open after delay, forcing close.");
+                            client.setScreen(null);
+                        }
+                        // 选择快捷栏第6格并右键
+                        if (client.player != null) {
+                            client.player.getInventory().selectedSlot = 5;
+                            LOGGER.info("Selected hotbar slot 6 after delay.");
+                        }
+                        if (client.player != null && client.interactionManager != null) {
+                            client.interactionManager.interactItem(client.player, client.player.getActiveHand());
+                            LOGGER.info("Right clicked with hotbar slot 6 after delay.");
+                        }
+                        // 结束任务
+                        finishTask();
+                    });
+                }, 500, TimeUnit.MILLISECONDS);
+                // 将当前阶段设为 IDLE，避免重复执行
+                currentStage = TaskStage.IDLE;
                 tickCounter = 0;
                 break;
 
@@ -225,9 +312,8 @@ public class AutoTaskManager {
                     client.interactionManager.interactItem(client.player, client.player.getActiveHand());
                     LOGGER.info("Right clicked with hotbar slot 6.");
                 }
-                currentStage = TaskStage.IDLE;
-                tickCounter = 0;
                 LOGGER.info("Task completed.");
+                finishTask();
                 break;
 
             // 补给模式专用阶段
@@ -247,18 +333,26 @@ public class AutoTaskManager {
                     }
                     Slot slot = containerScreen.getScreenHandler().getSlot(slotGlobal);
                     ItemStack stack = slot.getStack();
-                    if (!stack.isEmpty() && hasSupplyText(stack)) {
-                        LOGGER.info("Found supply slot at global index {}, clicking.", slotGlobal);
-                        clickSlot(containerScreen, slotGlobal, 0, SlotActionType.PICKUP);
-                        supplySlotIndex++; // 已处理，下一个
-                        currentStage = TaskStage.SUPPLY_ENTER_PANEL;
-                        break;
+                    if (!stack.isEmpty()) {
+                        // 检查是否有“未解锁”字样
+                        if (hasUnlockedText(stack)) {
+                            LOGGER.info("Slot {} contains '未解锁', skipping.", slotGlobal);
+                            supplySlotIndex++;
+                            break;
+                        }
+                        if (hasSupplyText(stack)) {
+                            LOGGER.info("Found supply slot at global index {}, clicking.", slotGlobal);
+                            clickSlot(containerScreen, slotGlobal, 0, SlotActionType.PICKUP);
+                            supplySlotIndex++; // 已处理，下一个
+                            currentStage = TaskStage.SUPPLY_ENTER_PANEL;
+                            break;
+                        }
                     }
                     // 没有补给字样，继续下一个
                     supplySlotIndex++;
                 } else {
                     LOGGER.error("Current screen is not a container in SUPPLY_CHECK_LOOP");
-                    currentStage = TaskStage.IDLE;
+                    finishTask();
                 }
                 break;
 
@@ -273,9 +367,11 @@ public class AutoTaskManager {
                 if (client.currentScreen instanceof GenericContainerScreen containerScreen) {
                     boolean selected = selectSupplyItem(containerScreen);
                     if (!selected) {
-                        LOGGER.info("No enabled item found in supply panel, closing screen.");
-                        client.setScreen(null); // 强制关闭
+                        LOGGER.info("No enabled item found in supply panel, clicking slot 0 to close.");
+                        // 左键点击0号格子，服务器会自动关闭此界面
+                        clickSlot(containerScreen, 0, 0, SlotActionType.PICKUP);
                     }
+                    // 无论是否选中，都等待返回第二界面
                     currentStage = TaskStage.SUPPLY_RETURN_TO_LOOP;
                 } else {
                     LOGGER.error("Expected container screen in SUPPLY_SELECT_ITEM");
@@ -292,6 +388,16 @@ public class AutoTaskManager {
                 }
                 break;
         }
+    }
+
+    private boolean hasUnlockedText(ItemStack stack) {
+        List<Text> tooltip = stack.getTooltip(Item.TooltipContext.DEFAULT, client.player, TooltipType.ADVANCED);
+        for (Text text : tooltip) {
+            if (text.getString().contains("未解锁")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ========== 辅助方法 ==========
@@ -313,7 +419,7 @@ public class AutoTaskManager {
             int playerInvStart = getPlayerInventoryStartSlot(containerScreen);
             if (playerInvStart == -1) {
                 LOGGER.error("Cannot find player inventory start slot!");
-                currentStage = TaskStage.IDLE;
+                finishTask();
                 return;
             }
             // 第2行第7列 → 相对偏移15
@@ -332,34 +438,29 @@ public class AutoTaskManager {
         return -1;
     }
 
-    private boolean checkRemainingAndRightClick() {
+    private boolean checkRemainingAndRightClick(int slotIndex) {
         if (client.currentScreen instanceof GenericContainerScreen containerScreen) {
             int playerInvStart = getPlayerInventoryStartSlot(containerScreen);
             if (playerInvStart == -1) return false;
 
             int containerSize = playerInvStart;
-            LOGGER.info("Second screen: container size = {}, total slots = {}", containerSize, containerScreen.getScreenHandler().slots.size());
+            if (slotIndex >= containerSize) {
+                LOGGER.warn("Slot {} is beyond container size {}, skipping", slotIndex, containerSize);
+                return false;
+            }
 
-            int[] slotsToCheck = {28, 37};
-            for (int slotIndex : slotsToCheck) {
-                if (slotIndex >= containerSize) {
-                    LOGGER.warn("Slot {} is beyond container size {}, skipping", slotIndex, containerSize);
-                    continue;
-                }
-                Slot slot = containerScreen.getScreenHandler().getSlot(slotIndex);
-                ItemStack stack = slot.getStack();
-                if (!stack.isEmpty()) {
-                    boolean hasRemaining = hasRemainingText(stack);
-                    LOGGER.info("Slot {} has remaining: {}", slotIndex, hasRemaining);
-                    if (!hasRemaining) {
-                        clickSlot(containerScreen, slotIndex, 1, SlotActionType.PICKUP);
-                        lastClickedSecondScreenSlot = slotIndex;
-                        LOGGER.info("Clicked slot {} (no remaining) to proceed to third screen.", slotIndex);
-                        return true;
-                    }
+            Slot slot = containerScreen.getScreenHandler().getSlot(slotIndex);
+            ItemStack stack = slot.getStack();
+            if (!stack.isEmpty()) {
+                boolean hasRemaining = hasRemainingText(stack);
+                LOGGER.info("Slot {} has remaining: {}", slotIndex, hasRemaining);
+                if (!hasRemaining) {
+                    clickSlot(containerScreen, slotIndex, 1, SlotActionType.PICKUP);
+                    lastClickedSecondScreenSlot = slotIndex; // 记录点击的格子，用于数值映射
+                    LOGGER.info("Clicked slot {} (no remaining) to proceed to third screen.", slotIndex);
+                    return true;
                 }
             }
-            LOGGER.info("No suitable slot (without remaining) found.");
         }
         return false;
     }
@@ -387,18 +488,19 @@ public class AutoTaskManager {
     private void selectItemByState() {
         if (!(client.currentScreen instanceof GenericContainerScreen containerScreen)) {
             LOGGER.error("Current screen is not a container, cannot select item.");
-            currentStage = TaskStage.IDLE;
+            finishTask();
             return;
         }
 
         int playerInvStart = getPlayerInventoryStartSlot(containerScreen);
         if (playerInvStart == -1) {
             LOGGER.error("Cannot find player inventory start slot in third screen!");
-            currentStage = TaskStage.IDLE;
+            finishTask();
             return;
         }
         LOGGER.info("Third screen: player inventory starts at slot {}", playerInvStart);
 
+        // 根据第二界面点击的槽位确定数值映射
         Map<String, String> valueToButtonMap;
         if (lastClickedSecondScreenSlot == 28) {
             valueToButtonMap = Map.of(
@@ -418,12 +520,16 @@ public class AutoTaskManager {
             LOGGER.info("Using line mapping (slot 37)");
         } else {
             LOGGER.error("Unknown last clicked slot: {}, cannot proceed", lastClickedSecondScreenSlot);
-            currentStage = TaskStage.IDLE;
+            finishTask();
             return;
         }
 
         DefaultedList<Slot> slots = containerScreen.getScreenHandler().slots;
         Map<String, Boolean> states = ModState.getInstance().getAllStates();
+        Map<String, Integer> priorities = ModState.getInstance().getAllPriorities();
+
+        // 收集所有候选物品（槽位索引，按钮名称，优先级）
+        List<Candidate> candidates = new ArrayList<>();
 
         for (int i = 0; i < playerInvStart; i++) {
             if (i >= slots.size()) break;
@@ -447,21 +553,40 @@ public class AutoTaskManager {
             if (foundValue != null) {
                 String buttonName = valueToButtonMap.get(foundValue);
                 Boolean enabled = states.get(buttonName);
-                LOGGER.info("Slot {}: found value '{}' -> button '{}', enabled: {}", i, foundValue, buttonName, enabled);
                 if (enabled != null && enabled) {
-                    LOGGER.info("Selected enabled item: {} (slot {})", buttonName, i);
-                    clickSlot(containerScreen, i, 0, SlotActionType.PICKUP);
-                    currentStage = TaskStage.CLOSE_SCREEN;
-                    tickCounter = 0;
-                    return;
+                    int priority = priorities.getOrDefault(buttonName, 0);
+                    candidates.add(new Candidate(i, buttonName, priority));
                 }
             } else {
                 LOGGER.debug("Slot {}: no matching value found in tooltip", i);
             }
         }
 
-        LOGGER.info("No enabled item found in container.");
-        currentStage = TaskStage.IDLE;
+        if (candidates.isEmpty()) {
+            LOGGER.info("No enabled item found for slot {}, proceeding to next slot.", lastClickedSecondScreenSlot);
+            normalSlotIndex++;
+            currentStage = TaskStage.CHECK_REMAINING;
+            tickCounter = 0;
+            return;
+        }
+
+        // 按优先级排序（数值大的优先），同优先级随机
+        Random rand = new Random();
+        candidates.sort((a, b) -> {
+            if (a.priority != b.priority) {
+                return Integer.compare(b.priority, a.priority); // 大的在前
+            } else {
+                return rand.nextBoolean() ? -1 : 1;
+            }
+        });
+
+        Candidate chosen = candidates.get(0);
+        LOGGER.info("Selected enabled item: {} (slot {}) with priority {}", chosen.buttonName, chosen.slotIndex, chosen.priority);
+        clickSlot(containerScreen, chosen.slotIndex, 0, SlotActionType.PICKUP);
+
+        // 当前格子已处理，准备检查下一个格子
+        normalSlotIndex++;
+        currentStage = TaskStage.CHECK_REMAINING;
         tickCounter = 0;
     }
 
@@ -470,38 +595,66 @@ public class AutoTaskManager {
         if (playerInvStart == -1) return false;
 
         Map<String, Boolean> states = ModState.getInstance().getAllStates();
-        // 合并鱼饵和鱼线的数值映射
-        Map<String, List<String>> valueToButtons = new HashMap<>();
-        valueToButtons.put("+2", List.of("普通鱼饵"));
-        valueToButtons.put("+4", List.of("罕见鱼饵", "普通鱼线"));
-        valueToButtons.put("+7", List.of("稀有鱼饵", "罕见鱼线"));
-        valueToButtons.put("+10", List.of("传奇鱼饵", "稀有鱼线"));
-        valueToButtons.put("+15", List.of("传奇鱼线"));
+        Map<String, Integer> priorities = ModState.getInstance().getAllPriorities();
+
+        // 定义需要排除的鱼饵和鱼线按钮（它们只用于声音模式）
+        Set<String> excludedButtons = new HashSet<>(Arrays.asList(
+                "普通鱼饵", "罕见鱼饵", "稀有鱼饵", "传奇鱼饵",
+                "普通鱼线", "罕见鱼线", "稀有鱼线", "传奇鱼线"
+        ));
+
+        List<Candidate> candidates = new ArrayList<>();
 
         for (int i = 0; i < playerInvStart; i++) {
             Slot slot = containerScreen.getScreenHandler().slots.get(i);
             ItemStack stack = slot.getStack();
             if (stack.isEmpty()) continue;
 
-            List<Text> tooltip = stack.getTooltip(Item.TooltipContext.DEFAULT, client.player, TooltipType.ADVANCED);
-            for (Text text : tooltip) {
-                String line = text.getString();
-                for (Map.Entry<String, List<String>> entry : valueToButtons.entrySet()) {
-                    if (line.contains(entry.getKey())) {
-                        for (String button : entry.getValue()) {
-                            if (states.getOrDefault(button, false)) {
-                                LOGGER.info("Selected supply item: {} (slot {}) based on value {}", button, i, entry.getKey());
-                                clickSlot(containerScreen, i, 0, SlotActionType.PICKUP);
-                                return true;
-                            }
-                        }
-                    }
+            String displayName = stack.getName().getString();
+            String cleanName = Formatting.strip(displayName);
+            if (cleanName == null) cleanName = displayName;
+
+            // 遍历所有启用的按钮，排除鱼饵/鱼线，进行名称匹配
+            for (Map.Entry<String, Boolean> entry : states.entrySet()) {
+                if (!entry.getValue()) continue; // 未启用，跳过
+                String buttonName = entry.getKey();
+                if (excludedButtons.contains(buttonName)) continue; // 排除鱼饵/鱼线
+                if (cleanName.equals(buttonName)) {
+                    int priority = priorities.getOrDefault(buttonName, 0);
+                    candidates.add(new Candidate(i, buttonName, priority));
                 }
             }
         }
-        return false;
-    }
 
+        if (candidates.isEmpty()) return false;
+
+        Random rand = new Random();
+        // 按优先级降序排序（数值大的优先），同优先级随机
+        candidates.sort((a, b) -> {
+            if (a.priority != b.priority) {
+                return Integer.compare(b.priority, a.priority); // 大的在前
+            } else {
+                return rand.nextBoolean() ? -1 : 1;
+            }
+        });
+
+        Candidate chosen = candidates.get(0);
+        LOGGER.info("Selected supply item: {} (slot {}) with priority {}", chosen.buttonName, chosen.slotIndex, chosen.priority);
+        clickSlot(containerScreen, chosen.slotIndex, 0, SlotActionType.PICKUP);
+        return true;
+    }
+    // 内部候选类（可放在类内部，与之前的 PendingTask 同级）
+    private static class Candidate {
+        int slotIndex;
+        String buttonName;
+        int priority;
+
+        Candidate(int slot, String name, int pri) {
+            this.slotIndex = slot;
+            this.buttonName = name;
+            this.priority = pri;
+        }
+    }
     private void clickSlot(GenericContainerScreen screen, int slotIndex, int button, SlotActionType action) {
         if (client.interactionManager != null) {
             client.interactionManager.clickSlot(
@@ -511,6 +664,17 @@ public class AutoTaskManager {
                     action,
                     client.player
             );
+        }
+    }
+
+    // 内部类：等待队列中的任务项
+    private static class PendingTask {
+        final TaskMode mode;
+        final long triggerTime;
+
+        PendingTask(TaskMode mode, long triggerTime) {
+            this.mode = mode;
+            this.triggerTime = triggerTime;
         }
     }
 
