@@ -28,7 +28,6 @@ public class MasterControlScreen extends Screen {
     private final List<ButtonGroup> groups = new ArrayList<>();
     private double scrollY = 0;
     private int contentHeight;
-    private ButtonWidget masterButton;
 
     public MasterControlScreen() {
         super(Text.literal("Master Control Panel"));
@@ -36,7 +35,8 @@ public class MasterControlScreen extends Screen {
     }
 
     private void buildGroups() {
-        groups.add(new ButtonGroup("总开关", Arrays.asList("总开关")));
+        // 新增功能开关组（两个独立开关）
+        groups.add(new ButtonGroup("功能开关", Arrays.asList("换鱼饵/鱼线", "换道具")));
         groups.add(new ButtonGroup("鱼饵", Arrays.asList(
                 "普通鱼饵", "罕见鱼饵", "稀有鱼饵", "传奇鱼饵"
         )));
@@ -92,62 +92,63 @@ public class MasterControlScreen extends Screen {
                 int baseX = startX + col * (totalWidthPerColumn + COLUMN_SPACING);
                 int y = itemsStartY + row * (BUTTON_HEIGHT + 5);
 
-                // 总开关组特殊处理
-                if (group.title.equals("总开关")) {
-                    // 总开关按钮
-                    masterButton = ButtonWidget.builder(
-                            getMasterButtonText(),
+                if (group.title.equals("功能开关")) {
+                    // 创建两个独立开关按钮（没有加减号）
+                    if (i == 0) {
+                        // 换鱼饵/鱼线开关
+                        ButtonWidget soundBtn = ButtonWidget.builder(
+                                getSoundButtonText(),
+                                btn -> {
+                                    modState.toggleSound();
+                                    btn.setMessage(getSoundButtonText());
+                                }
+                        ).dimensions(baseX, y, MAIN_BUTTON_WIDTH, BUTTON_HEIGHT).build();
+                        addDrawableChild(soundBtn);
+                        group.itemWidgets.add(new ItemWidget(soundBtn, null, null));
+                    } else if (i == 1) {
+                        // 换道具开关
+                        ButtonWidget supplyBtn = ButtonWidget.builder(
+                                getSupplyButtonText(),
+                                btn -> {
+                                    modState.toggleSupply();
+                                    btn.setMessage(getSupplyButtonText());
+                                }
+                        ).dimensions(baseX, y, MAIN_BUTTON_WIDTH, BUTTON_HEIGHT).build();
+                        addDrawableChild(supplyBtn);
+                        group.itemWidgets.add(new ItemWidget(supplyBtn, null, null));
+                    }
+                } else {
+                    // 普通物品：创建三个按钮
+                    ButtonWidget mainBtn = ButtonWidget.builder(
+                            getItemButtonText(name, modState.getState(name), modState.getPriority(name)),
                             btn -> {
-                                modState.toggleMaster();
-                                btn.setMessage(getMasterButtonText());
+                                modState.toggleState(name);
+                                btn.setMessage(getItemButtonText(name, modState.getState(name), modState.getPriority(name)));
                             }
                     ).dimensions(baseX, y, MAIN_BUTTON_WIDTH, BUTTON_HEIGHT).build();
-                    addDrawableChild(masterButton);
 
-                    // 问号帮助按钮
-                    ButtonWidget helpButton = ButtonWidget.builder(
-                            Text.literal("?"),
-                            btn -> client.setScreen(new HelpScreen(this))
+                    ButtonWidget minusBtn = ButtonWidget.builder(
+                            Text.literal("-"),
+                            btn -> {
+                                modState.decreasePriority(name);
+                                mainBtn.setMessage(getItemButtonText(name, modState.getState(name), modState.getPriority(name)));
+                            }
                     ).dimensions(baseX + MAIN_BUTTON_WIDTH + ITEM_SPACING, y, SMALL_BUTTON_WIDTH, BUTTON_HEIGHT).build();
-                    addDrawableChild(helpButton);
 
-                    group.itemWidgets.add(new ItemWidget(masterButton, null, helpButton)); // 帮助按钮暂存于 plusBtn 位置
-                    continue;
+                    ButtonWidget plusBtn = ButtonWidget.builder(
+                            Text.literal("+"),
+                            btn -> {
+                                modState.increasePriority(name);
+                                mainBtn.setMessage(getItemButtonText(name, modState.getState(name), modState.getPriority(name)));
+                            }
+                    ).dimensions(baseX + MAIN_BUTTON_WIDTH + ITEM_SPACING + SMALL_BUTTON_WIDTH + ITEM_SPACING, y, SMALL_BUTTON_WIDTH, BUTTON_HEIGHT).build();
+
+                    addDrawableChild(mainBtn);
+                    addDrawableChild(minusBtn);
+                    addDrawableChild(plusBtn);
+
+                    group.itemWidgets.add(new ItemWidget(mainBtn, minusBtn, plusBtn));
                 }
-
-                // 普通物品：创建三个按钮
-                // 主按钮
-                ButtonWidget mainBtn = ButtonWidget.builder(
-                        getItemButtonText(name, modState.getState(name), modState.getPriority(name)),
-                        btn -> {
-                            modState.toggleState(name);
-                            btn.setMessage(getItemButtonText(name, modState.getState(name), modState.getPriority(name)));
-                        }
-                ).dimensions(baseX, y, MAIN_BUTTON_WIDTH, BUTTON_HEIGHT).build();
-
-                // 减号按钮
-                ButtonWidget minusBtn = ButtonWidget.builder(
-                        Text.literal("-"),
-                        btn -> {
-                            modState.decreasePriority(name);
-                            mainBtn.setMessage(getItemButtonText(name, modState.getState(name), modState.getPriority(name)));
-                        }
-                ).dimensions(baseX + MAIN_BUTTON_WIDTH + ITEM_SPACING, y, SMALL_BUTTON_WIDTH, BUTTON_HEIGHT).build();
-
-                // 加号按钮
-                ButtonWidget plusBtn = ButtonWidget.builder(
-                        Text.literal("+"),
-                        btn -> {
-                            modState.increasePriority(name);
-                            mainBtn.setMessage(getItemButtonText(name, modState.getState(name), modState.getPriority(name)));
-                        }
-                ).dimensions(baseX + MAIN_BUTTON_WIDTH + ITEM_SPACING + SMALL_BUTTON_WIDTH + ITEM_SPACING, y, SMALL_BUTTON_WIDTH, BUTTON_HEIGHT).build();
-
-                addDrawableChild(mainBtn);
-                addDrawableChild(minusBtn);
-                addDrawableChild(plusBtn);
-
-                group.itemWidgets.add(new ItemWidget(mainBtn, minusBtn, plusBtn));
             }
 
             int rows = (int) Math.ceil((double) group.buttonNames.size() / COLUMNS_PER_GROUP);
@@ -182,20 +183,20 @@ public class MasterControlScreen extends Screen {
                 int baseX = startX + col * (totalWidthPerColumn + COLUMN_SPACING);
                 int y = itemsStartY + row * (BUTTON_HEIGHT + 5);
 
-                if (group.title.equals("总开关")) {
+                if (group.title.equals("功能开关")) {
                     widget.mainBtn.setX(baseX);
                     widget.mainBtn.setY(y);
-                    if (widget.plusBtn != null) {  // plusBtn 此时存放的是帮助按钮
-                        widget.plusBtn.setX(baseX + MAIN_BUTTON_WIDTH + ITEM_SPACING);
-                        widget.plusBtn.setY(y);
-                    }
                 } else {
                     widget.mainBtn.setX(baseX);
                     widget.mainBtn.setY(y);
-                    widget.minusBtn.setX(baseX + MAIN_BUTTON_WIDTH + ITEM_SPACING);
-                    widget.minusBtn.setY(y);
-                    widget.plusBtn.setX(baseX + MAIN_BUTTON_WIDTH + ITEM_SPACING + SMALL_BUTTON_WIDTH + ITEM_SPACING);
-                    widget.plusBtn.setY(y);
+                    if (widget.minusBtn != null) {
+                        widget.minusBtn.setX(baseX + MAIN_BUTTON_WIDTH + ITEM_SPACING);
+                        widget.minusBtn.setY(y);
+                    }
+                    if (widget.plusBtn != null) {
+                        widget.plusBtn.setX(baseX + MAIN_BUTTON_WIDTH + ITEM_SPACING + SMALL_BUTTON_WIDTH + ITEM_SPACING);
+                        widget.plusBtn.setY(y);
+                    }
                 }
             }
 
@@ -239,10 +240,17 @@ public class MasterControlScreen extends Screen {
         }
     }
 
-    private Text getMasterButtonText() {
-        String status = modState.isMasterEnabled() ? "开启" : "关闭";
-        return Text.literal("总开关: ").append(
-                Text.literal(status).formatted(modState.isMasterEnabled() ? Formatting.GREEN : Formatting.RED)
+    private Text getSoundButtonText() {
+        String status = modState.isSoundEnabled() ? "开启" : "关闭";
+        return Text.literal("换鱼饵/鱼线: ").append(
+                Text.literal(status).formatted(modState.isSoundEnabled() ? Formatting.GREEN : Formatting.RED)
+        );
+    }
+
+    private Text getSupplyButtonText() {
+        String status = modState.isSupplyEnabled() ? "开启" : "关闭";
+        return Text.literal("换道具: ").append(
+                Text.literal(status).formatted(modState.isSupplyEnabled() ? Formatting.GREEN : Formatting.RED)
         );
     }
 

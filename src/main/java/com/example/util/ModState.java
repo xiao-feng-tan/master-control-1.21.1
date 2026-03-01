@@ -13,14 +13,14 @@ public class ModState {
     private static ModState instance;
     private final Map<String, Boolean> buttonStates = new LinkedHashMap<>();
     private final Map<String, Integer> priorities = new LinkedHashMap<>();
-    private boolean masterEnabled = false; // 总开关，默认关闭
+    private boolean soundEnabled = false;   // 换鱼饵/鱼线（声音检测）
+    private boolean supplyEnabled = false;  // 换道具（聊天“用完了”检测）
 
     private static final Path CONFIG_PATH = FabricLoader.getInstance().getConfigDir().resolve("master-control.json");
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
     private ModState() {
-        load(); // 加载配置
-        // 如果配置文件中没有完整初始化，则用默认值填充
+        load();
         initializeDefaultsIfNeeded();
     }
 
@@ -65,15 +65,6 @@ public class ModState {
         return new LinkedHashMap<>(buttonStates);
     }
 
-    public boolean isMasterEnabled() {
-        return masterEnabled;
-    }
-
-    public void toggleMaster() {
-        masterEnabled = !masterEnabled;
-        save();
-    }
-
     public int getPriority(String buttonName) {
         return priorities.getOrDefault(buttonName, 0);
     }
@@ -95,21 +86,42 @@ public class ModState {
         return new LinkedHashMap<>(priorities);
     }
 
+    // ===== 独立开关 =====
+    public boolean isSoundEnabled() {
+        return soundEnabled;
+    }
+
+    public void toggleSound() {
+        soundEnabled = !soundEnabled;
+        save();
+    }
+
+    public boolean isSupplyEnabled() {
+        return supplyEnabled;
+    }
+
+    public void toggleSupply() {
+        supplyEnabled = !supplyEnabled;
+        save();
+    }
+
     // ========== 持久化 ==========
     private static class StateData {
-        boolean masterEnabled;
+        boolean soundEnabled;
+        boolean supplyEnabled;
         Map<String, Boolean> buttonStates;
         Map<String, Integer> priorities;
     }
 
     private void load() {
         if (!CONFIG_PATH.toFile().exists()) {
-            return; // 使用默认值
+            return;
         }
         try (Reader reader = new FileReader(CONFIG_PATH.toFile())) {
             StateData data = GSON.fromJson(reader, StateData.class);
             if (data != null) {
-                this.masterEnabled = data.masterEnabled;
+                this.soundEnabled = data.soundEnabled;
+                this.supplyEnabled = data.supplyEnabled;
                 if (data.buttonStates != null) {
                     buttonStates.clear();
                     buttonStates.putAll(data.buttonStates);
@@ -126,7 +138,8 @@ public class ModState {
 
     private void save() {
         StateData data = new StateData();
-        data.masterEnabled = this.masterEnabled;
+        data.soundEnabled = this.soundEnabled;
+        data.supplyEnabled = this.supplyEnabled;
         data.buttonStates = new LinkedHashMap<>(this.buttonStates);
         data.priorities = new LinkedHashMap<>(this.priorities);
 
@@ -137,4 +150,3 @@ public class ModState {
         }
     }
 }
-
