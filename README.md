@@ -25,7 +25,7 @@
 - 本模组基于特定服务器界面布局设计（双箱子界面 + 玩家背包），若在其他环境使用需调整槽位索引。
 - 默认快捷键为 F6，可在游戏控制设置中修改。<br>
   
-### 适用于yourcraft服务器的自动钓鱼modhttps://github.com/xiao-feng-tan/yourcraft_autofish?tab=readme-ov-file
+### 适用于yourcraft服务器的自动钓鱼mod https://github.com/xiao-feng-tan/yourcraft_autofish?tab=readme-ov-file
 -这是一个推广链接,可搭配使用qwq
 
 如有问题或建议，欢迎反馈。
