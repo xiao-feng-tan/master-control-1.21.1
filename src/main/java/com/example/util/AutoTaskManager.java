@@ -60,6 +60,9 @@ public class AutoTaskManager {
 
     // 第二界面点击记录（用于正常模式）
     private int lastClickedSecondScreenSlot = -1;
+    // 新增：第二界面验证重试计数
+    private int secondScreenRetries = 0;
+    private static final int MAX_SECOND_SCREEN_RETRIES = 3;
 
     private AutoTaskManager() {
         this.client = MinecraftClient.getInstance();
@@ -142,6 +145,7 @@ public class AutoTaskManager {
         currentStage = TaskStage.SELECT_HOTBAR_SLOT_2;
         tickCounter = 0;
         normalSlotIndex = 0;
+        secondScreenRetries = 0; // 重置重试计数
     }
 
     private void finishTask() {
@@ -204,8 +208,21 @@ public class AutoTaskManager {
                 break;
 
             case WAIT_SECOND_SCREEN:
-                if (client.currentScreen instanceof GenericContainerScreen) {
-                    currentStage = TaskStage.CHECK_REMAINING;
+                if (client.currentScreen instanceof GenericContainerScreen containerScreen) {
+                    if (isCorrectSecondScreen(containerScreen)) {
+                        currentStage = TaskStage.CHECK_REMAINING;
+                        secondScreenRetries = 0;
+                    } else {
+                        secondScreenRetries++;
+                        LOGGER.warn("Second screen verification failed (attempt {}), retrying click backpack slot.", secondScreenRetries);
+                        if (secondScreenRetries >= MAX_SECOND_SCREEN_RETRIES) {
+                            LOGGER.error("Max retries reached for second screen, aborting task.");
+                            finishTask();
+                        } else {
+                            // 回退到点击背包槽位，重新尝试
+                            currentStage = TaskStage.CLICK_BACKPACK_SLOT;
+                        }
+                    }
                 }
                 break;
 
@@ -380,6 +397,31 @@ public class AutoTaskManager {
                 }
                 break;
         }
+    }
+    // 新增：验证第二界面是否正确（通过槽位28是否有“鱼饵”字样）
+    private boolean isCorrectSecondScreen(GenericContainerScreen screen) {
+        try {
+            if (screen.getScreenHandler().slots.size() <= 28) {
+                LOGGER.debug("Second screen has less than 29 slots, cannot verify.");
+                return false;
+            }
+            Slot slot = screen.getScreenHandler().getSlot(28);
+            ItemStack stack = slot.getStack();
+            if (stack.isEmpty()) {
+                LOGGER.debug("Slot 28 is empty, second screen may be incorrect.");
+                return false;
+            }
+            List<Text> tooltip = stack.getTooltip(Item.TooltipContext.DEFAULT, client.player, TooltipType.ADVANCED);
+            for (Text text : tooltip) {
+                if (text.getString().contains("鱼饵")) {
+                    return true;
+                }
+            }
+            LOGGER.debug("Slot 28 does not contain '鱼饵' in tooltip.");
+        } catch (Exception e) {
+            LOGGER.error("Error verifying second screen", e);
+        }
+        return false;
     }
 
     private boolean hasUnlockedText(ItemStack stack) {
