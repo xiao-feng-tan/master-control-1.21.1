@@ -1,7 +1,7 @@
 # Master Control - 自动补给模组
 
-一个为 Minecraft 1.21.1 Fabric 设计的自动化模组，专用于自动补充钓鱼相关道具。
-需装前置###Fabric API###
+一个为 Minecraft 1.21.1 Fabric 设计的自动化模组，专用于自动补充钓鱼相关道具。<br>
+需装前置### Fabric API
 
 ## 功能简介
 
@@ -23,6 +23,9 @@
 ## 注意事项
 
 - 本模组基于特定服务器界面布局设计（双箱子界面 + 玩家背包），若在其他环境使用需调整槽位索引。
-- 默认快捷键为 F6，可在游戏控制设置中修改。
+- 默认快捷键为 F6，可在游戏控制设置中修改。<br>
+  
+### 适用于yourcraft服务器的自动钓鱼modhttps://github.com/xiao-feng-tan/yourcraft_autofish?tab=readme-ov-file
+-这是一个推广链接,可搭配使用qwq
 
 如有问题或建议，欢迎反馈。
