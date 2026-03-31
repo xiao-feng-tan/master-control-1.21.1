@@ -62,7 +62,7 @@ public class MasterControlScreen extends Screen {
                 "强力护符", "智力护符", "闪光护符", "冒险护符", "幸运护符"
         )));
         groups.add(new ButtonGroup("其他", Arrays.asList(
-                "能量饮料", "超级鱼竿", "库存补充器", "纯净灯笼"
+                "能量饮料", "超级钓竿", "库存补充器", "纯净灯笼"
         )));
     }
 

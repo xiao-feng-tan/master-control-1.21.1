@@ -646,9 +646,13 @@ public class AutoTaskManager {
                 if (!entry.getValue()) continue;
                 String buttonName = entry.getKey();
                 if (excludedButtons.contains(buttonName)) continue;
-                if (cleanName.equals(buttonName)) {
+
+                // 改为包含匹配（忽略大小写）
+                if (cleanName.toLowerCase().contains(buttonName.toLowerCase())) {
                     int priority = priorities.getOrDefault(buttonName, 0);
                     candidates.add(new Candidate(i, buttonName, priority));
+                    // 注意：这里没有break，一个物品可能匹配多个按钮名称（如“强力鱼钩增强器”同时匹配“鱼钩增强器”），
+                    // 但通过优先级最终会选择最合适的，若想避免重复，可在匹配到后break跳出内循环。
                 }
             }
         }
@@ -658,7 +662,7 @@ public class AutoTaskManager {
         Random rand = new Random();
         candidates.sort((a, b) -> {
             if (a.priority != b.priority) {
-                return Integer.compare(b.priority, a.priority); // 大的在前
+                return Integer.compare(b.priority, a.priority);
             } else {
                 return rand.nextBoolean() ? -1 : 1;
             }
